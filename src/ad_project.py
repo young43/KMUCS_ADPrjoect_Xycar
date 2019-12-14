@@ -103,10 +103,7 @@ def detect_yellowline(frame):
 
     mask = cv2.inRange(mask, lower_white, upper_white)
 
-    if cv2.countNonZero(mask) > 100:
-        print(cv2.countNonZero(mask))
-
-    if cv2.countNonZero(mask) >= 300:
+    if cv2.countNonZero(mask) >= 500:
         return True
     return False
 
