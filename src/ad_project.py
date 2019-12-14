@@ -331,11 +331,11 @@ def start(brightness):
             speed = 133
 
         # traffic signs
-        coordinate, image, sign_type, text = localization(cv_image, 2, similitary_contour_with_circle, model, count, current_sign)
+        coordinate, image, sign_type, text = localization(cv_image, 2,
+                                                          similitary_contour_with_circle, model, count, current_sign)
         if sign_type > 0 and (not current_sign or sign_type != current_sign):
             current_sign = sign_type
             current_text = text
-
 
         # 1) Slow
         if current_sign != None and current_text == "SLOW":
