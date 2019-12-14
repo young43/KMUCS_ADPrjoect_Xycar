@@ -4,6 +4,12 @@ import cv2, time, rospy, rospkg, math, os, numpy as np
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Joy, Image
 from std_msgs.msg import Int32MultiArray
+
+from fillter import *
+from motordriver import *
+from obstacledetector import *
+from traffic_detect import *
+
 bridge = CvBridge()
 pub = None
 cv_image = np.empty(shape=[0])
@@ -47,27 +53,6 @@ class ObstacleDetector:
 
     def get_distance(self):
         return self.left, self.mid, self.right
-
-class MovingAverage:
-    def __init__(self, n):
-        self.samples = n
-        self.data = []
-        self.weights = list(range(1, n + 1))
-
-    def add_sample(self, new_sample):
-        if len(self.data) < self.samples:
-            self.data.append(new_sample)
-        else:
-            self.data = self.data[1:] + [new_sample]
-
-    def get_mm(self):
-        return float(sum(self.data)) / len(self.data)
-
-    def get_wmm(self):
-        s = 0
-        for i, x in enumerate(self.data):
-            s += x * self.weights[i]
-        return float(s) / sum(self.weights[:len(self.data)])
 
 
 def img_callback(data):
@@ -145,8 +130,6 @@ def process_image(frame, brightness):
     edge2_img = edge_img[430 - offset_roi:450 - offset_roi, 0:width]
     hsv_mask = mask
 
-    #lines = cv2.HoughLinesP(edge2_img, 1, 1 * np.pi / 180, 30, np.array([]), minLineLength=10, maxLineGap=20)
-
     lines = cv2.HoughLinesP(edge2_img, 1, 1 * np.pi / 180, 30, np.array([]), minLineLength=15, maxLineGap=50)
 
     l_x1_s, l_y1_s, l_x2_s, l_y2_s = 0, 0, 0, 0
@@ -172,18 +155,13 @@ def process_image(frame, brightness):
             if int(x1 - x2) == 0:
                 continue
 
-            #cv2.line(copy_img, (x1, y1), (x2, y2), (0, 255, 0), 3)
-            # if ((y2 - y1) / (x1 - x2)) > 0.00001 and (x1 < 300 and x2 < 300):
-            slope = int(((y2 - y1) / (x1 - x2)) * 10000000)
             if (y2-y1) < 0 and (x1 < 300 and x2 < 300):
-                #print("Left: y(", y2-y1, " )   x(", x1-x2, ")")
                 l_x1_s += x1
                 l_y1_s += y1
                 l_x2_s += x2
                 l_y2_s += y2
                 left_num += 1
                 cv2.line(copy_img, (x1, y1), (x2, y2), (0, 255, 0), 3)
-                # cv2.line(copy_img, (x1, y1+430 - offset_roi), (x2, y2+430 - offset_roi), (0, 255, 0), 3)
             elif (y2-y1) > 0 and (x1 > 340 and x2 > 340):
                 r_x1_s += x1
                 r_y1_s += y1
@@ -191,21 +169,6 @@ def process_image(frame, brightness):
                 r_y2_s += y2
                 right_num += 1
                 cv2.line(copy_img, (x1, y1), (x2, y2), (0, 0, 255), 3)
-                # cv2.line(copy_img, (x1, y1+430 - offset_roi), (x2, y2+430 - offset_roi), (0, 255, 0), 3)
-            # if x1 < 240 and x2 < 240  and (x1 < 260 and x2 < 260):
-            #     l_x1_s += x1
-            #     l_y1_s += y1
-            #     l_x2_s += x2
-            #     l_y2_s += y2
-            #     left_num += 1
-            #     #cv2.line(copy_img, (x1, y1+430 - offset_roi), (x2, y2+430 - offset_roi), (0, 255, 0), 3)
-            # elif x1 > 400 and x2 > 400 and (x1 > 380 and x2 > 380):
-            #     r_x1_s += x1
-            #     r_y1_s += y1
-            #     r_x2_s += x2
-            #     r_y2_s += y2
-            #     right_num += 1
-            #     #cv2.line(copy_img, (x1, y1+430 - offset_roi), (x2, y2+430 - offset_roi), (0, 255, 0), 3)
 
     if left_num != 0:
         l_x1_a = l_x1_s / left_num
@@ -275,7 +238,6 @@ def steer(lslope, rslope, l_x1_a, l_x2_a, r_x1_a, r_x2_a):
     # radian to degree
     angle = radian / math.pi * 180.0
     angle = int(round(angle))
-    # print(angle+90)
 
     return angle + 90
 
@@ -288,9 +250,6 @@ def accelerate(angle):
 
     if 88 <= angle <= 92:
         speed = 140
-
-
-    #speed = 140
 
     return speed
 
@@ -323,6 +282,31 @@ def start(brightness):
     yellow_flag = False
     yellow_time = 0
 
+
+    # traffic signs detect
+    # Clean previous image
+    clean_images()
+    # Training phase
+    model = training()
+
+    # initialize the termination criteria for cam shift, indicating
+    # a maximum of ten iterations or movement by a least one pixel
+    # along with the bounding box of the ROI
+    termination = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 1)
+    roiBox = None
+    roiHist = None
+
+    success = True
+    similitary_contour_with_circle = 0.65  # parameter
+    count = 0
+    current_sign = None
+    current_text = ""
+    current_size = 0
+    sign_count = 0
+    coordinates = []
+    position = []
+
+
     while cv_image.size == 921600:
         recorder.write(cv_image)
 
@@ -334,9 +318,9 @@ def start(brightness):
 
         lslope, rslope, lpos1, lpos2, rpos1, rpos2 = process_image(cv_image, brightness)
         x_location = steer(lslope, rslope, lpos1, lpos2, rpos1, rpos2)
-        # x_location = (rpos - 320 - offset) * 0.6
         x_location = int(round(x_location))
         speed = accelerate(x_location)
+
         if detect_yellowline(cv_image) and (not yellow_flag) and time.time()-start_time >= 30:
             print("Yellow")
             yellow_flag = True
@@ -346,35 +330,38 @@ def start(brightness):
             break
 
 
-
-
-
-
         if lslope >= 9900 and rslope >= 9900 and x_location == 90:
             speed = 133
 
         # traffic signs
+        coordinate, image, sign_type, text = localization(cv_image, 2, similitary_contour_with_circle, model, count, current_sign)
+        if sign_type > 0 and (not current_sign or sign_type != current_sign):
+            current_sign = sign_type
+            current_text = text
+
+
         # 1) Slow
-        if 10 <= time.time() - start_time <= 15:
+        if current_sign != None and current_text == "SLOW":
             speed = 116
 
         # 2) Stop
-        if 45 <= time.time() - start_time <= 50:
+        if current_sign != None and current_text == "STOP":
             speed = 90
 
         if yellow_flag:
             x_location = (rpos2 - 320 - offset) * 0.6
+            x_location = int(round(x_location))
 
         auto_drive(x_location, speed)
 
         if cv2.waitKey(1) & 255 == ord('q'):
             break
-        #cv2.imshow('origin', cv_image)
+
+
     cv2.destroyAllWindows()
     recorder.release()
 
     print("parking")
-
     for i in range(2):
         auto_drive(90, 90)
         time.sleep(0.1)
